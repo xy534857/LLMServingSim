@@ -1,0 +1,59 @@
+# Qwen3.5 / Qwen3.6 / Qwen3-Next hybrid MoE family.
+#
+# These models mix Gated DeltaNet linear-attention layers with periodic
+# full-attention layers. The profiler still captures one decoder layer
+# at a time, so use derived one-layer configs when profiling:
+#   * layer_types: ["linear_attention"]  -> linear_attention row in dense.csv
+#   * layer_types: ["full_attention"]    -> attention.csv rows
+#
+# Canonical names mirror vLLM's qwen3_next.py implementation.
+
+
+sequence:
+  prologue:  [embedding]
+  pre_attn:  [layernorm, linear_attention, qkv_proj, qk_norm, rotary_emb, attention]
+  post_attn: [o_proj, layernorm]
+  mlp_dense: []
+  mlp_moe:   [moe]
+  head:      [final_layernorm, lm_head, sampler]
+
+
+catalog:
+  dense:
+    embedding:
+      vllm: VocabParallelEmbedding
+    layernorm:
+      vllm: GemmaRMSNorm
+      within: Qwen3NextDecoderLayer
+      tp_stable: true
+    linear_attention:
+      vllm: GatedDeltaNetAttention
+      within: Qwen3NextDecoderLayer
+    qkv_proj:
+      vllm: QKVParallelLinear
+      within: Qwen3NextAttention
+    qk_norm:
+      vllm: GemmaRMSNorm
+      within: Qwen3NextAttention
+      tp_stable: true
+    rotary_emb:
+      vllm: RotaryEmbedding
+    o_proj:
+      vllm: RowParallelLinear
+      within: Qwen3NextAttention
+    final_layernorm:
+      vllm: GemmaRMSNorm
+      within: Qwen3NextModel
+      tp_stable: true
+  per_sequence:
+    lm_head:
+      vllm: LogitsProcessor
+    sampler:
+      vllm: Sampler
+      tp_stable: true
+  attention:
+    attention:
+      vllm: Attention
+  moe:
+    moe:
+      vllm: Qwen3NextSparseMoeBlock

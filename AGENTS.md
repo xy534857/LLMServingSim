@@ -51,6 +51,7 @@ LLMServingSim/
 │   │   ├── logger.py           # Rich-based logger + stdio capture
 │   │   └── hooks/              # vLLM-internal-API touchpoints (worker ext, MoE patch, etc.)
 │   ├── models/                 # Architecture yamls, one per HF `model_type`
+│   │                            # Includes qwen3_next for Qwen3.5/3.6 hybrid linear-attention MoE
 │   ├── power/                  # nvidia-smi / IPMI power-logging helpers
 │   ├── perf/                   # Output: perf/<hw>/<model>/<variant>/tp<N>/{dense,per_sequence,attention,moe,skew,skew_fit}.csv
 │   ├── v0/                     # Legacy (pre-rewrite) profiler, kept for reference
@@ -73,6 +74,8 @@ LLMServingSim/
 │   ├── docker-sim.sh           # simulator container
 │   ├── install-vllm.sh         # bare-metal vLLM install (uv venv)
 │   └── compile.sh              # ASTRA-Sim + Chakra build
+├── docker/
+│   └── h100-dev/Dockerfile      # GHCR-pushed H100 dev image: vLLM + simulator build deps
 └── astra-sim/                  # ASTRA-Sim C++ backend (submodule)
     ├── inputs/                 # Generated configs (network, memory, system)
     └── extern/graph_frontend/chakra/  # Chakra trace converter

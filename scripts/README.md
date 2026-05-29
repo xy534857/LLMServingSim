@@ -23,6 +23,19 @@ Inside Docker (recommended):
 ./scripts/compile.sh       # one-time ASTRA-Sim + Chakra build (inside docker-sim)
 ```
 
+On Apple Silicon, avoid an x86_64 Docker VM for simulator runs. Start
+an ARM Colima profile, build the simulator image from source, then point
+`docker-sim.sh` at it:
+
+```bash
+colima start --profile servingsim-arm --arch aarch64 --cpu 8 --memory 16 --disk 80
+docker context use colima-servingsim-arm
+docker build -t llmservingsim-astra-arm:local ./astra-sim
+SIM_DOCKER_IMAGE=llmservingsim-astra-arm:local \
+SIM_CONTAINER_NAME=servingsim_arm \
+  ./scripts/docker-sim.sh
+```
+
 Bare metal (vLLM side only):
 
 ```bash

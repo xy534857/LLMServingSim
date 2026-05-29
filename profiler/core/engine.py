@@ -182,6 +182,14 @@ def fuse_engine_kwargs(args: ProfileArgs, tp: int) -> dict[str, Any]:
                 f"shard field {field_name!r} must be an int; got "
                 f"{type(val).__name__}"
             )
+        if field_name == "num_key_value_heads" and val < tp:
+            if tp % val != 0:
+                raise ValueError(
+                    f"model config field {field_name!r}={val} cannot be "
+                    f"replicated across tp={tp}; tp must be divisible by it"
+                )
+            sharded_overrides[field_name] = 1
+            continue
         if val % tp != 0:
             raise ValueError(
                 f"model config field {field_name!r}={val} is not "

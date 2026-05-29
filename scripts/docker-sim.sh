@@ -8,12 +8,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../scripts
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"                    # .../LLMServingSim
+SIM_DOCKER_IMAGE="${SIM_DOCKER_IMAGE:-astrasim/tutorial-micro2024}"
+SIM_CONTAINER_NAME="${SIM_CONTAINER_NAME:-servingsim_docker}"
 
-docker run --name servingsim_docker \
+docker run --name "$SIM_CONTAINER_NAME" \
   -it \
   -v "$REPO_ROOT":/app/LLMServingSim \
   -w /app/LLMServingSim \
-  astrasim/tutorial-micro2024 \
+  "$SIM_DOCKER_IMAGE" \
   bash -c "pip3 install pyyaml pyinstrument transformers datasets \
   msgspec scikit-learn xgboost==3.1.2 matplotlib==3.5.3 pandas==1.5.3 \
   numpy==1.23.5 && exec bash"

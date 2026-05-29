@@ -1115,6 +1115,34 @@ def _sequence(perf_db, section):
     return list(seq.get(section) or [])
 
 
+def _layer_type(ctx, layer_num):
+    layer_types = ctx.config.get("layer_types") or []
+    if layer_num < len(layer_types):
+        return layer_types[layer_num]
+    return None
+
+
+def _section_for_layer(ctx, section, layer_num):
+    layers = _sequence(ctx.perf_db, section)
+    layer_type = _layer_type(ctx, layer_num)
+    if layer_type == "linear_attention":
+        if section == "pre_attn":
+            return [
+                layer for layer in layers
+                if layer not in {"qkv_proj", "qk_norm", "rotary_emb", "attention"}
+            ]
+        if section == "post_attn":
+            return [layer for layer in layers if layer != "o_proj"]
+    if layer_type == "full_attention" and section == "pre_attn":
+        return [layer for layer in layers if layer != "linear_attention"]
+    return layers
+
+
+def _has_mixed_layer_types(config):
+    layer_types = config.get("layer_types") or []
+    return len(set(layer_types)) > 1
+
+
 _skipped_layer_warned = set()
 
 
@@ -1176,13 +1204,13 @@ def _emit_sequence(ctx, bctx, layer_num, layers, lines, power_acc, batch_tag):
 
 
 def _emit_pre_attn_layers(ctx, bctx, layer_num, lines, power_acc, batch_tag='NONE'):
-    _emit_sequence(ctx, bctx, layer_num, _sequence(ctx.perf_db, "pre_attn"),
+    _emit_sequence(ctx, bctx, layer_num, _section_for_layer(ctx, "pre_attn", layer_num),
                    lines, power_acc, batch_tag)
 
 
 def _emit_post_attn_layers(ctx, bctx, layer_num, lines, power_acc, batch_id_str, batch_tag='NONE'):
     # Attention post-processing common to dense and MoE.
-    _emit_sequence(ctx, bctx, layer_num, _sequence(ctx.perf_db, "post_attn"),
+    _emit_sequence(ctx, bctx, layer_num, _section_for_layer(ctx, "post_attn", layer_num),
                    lines, power_acc, batch_tag)
     # MLP: either the dense FFN stack or a single MoE block.
     if ctx.is_moe:
@@ -1315,7 +1343,10 @@ def _synthesize_trace(hardware, model, config, tp_size, pp_size, local_ep, ep_to
 
         # Transformer blocks
         num_layers = config['num_hidden_layers']
-        iter_count, copy_count = (num_layers, 1) if block_mode_on else (1, num_layers)
+        iter_count, copy_count = (
+            (num_layers, 1) if block_mode_on or _has_mixed_layer_types(config)
+            else (1, num_layers)
+        )
 
         for layer_num in range(iter_count):
             block_lines, block_power = _build_transformer_block(ctx, bctx, layer_num, 'NONE', str(batch.batch_id))
@@ -1393,7 +1424,10 @@ def _synthesize_interleaved_trace(hardware, model, config, tp_size, pp_size, loc
 
         # MIDDLE LAYERS: interleaved post_attn + pre_attn
         middle_layers = num_layers - 1
-        iter_count, copy_count = (middle_layers, 1) if block_mode_on else (1, middle_layers)
+        iter_count, copy_count = (
+            (middle_layers, 1) if block_mode_on or _has_mixed_layer_types(config)
+            else (1, middle_layers)
+        )
 
         for layer_num in range(iter_count):
             block_lines = []

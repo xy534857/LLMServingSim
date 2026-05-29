@@ -8,6 +8,10 @@ GB_TO_BYTE = 1024 * 1024 * 1024
 MB_TO_BYTE = 1024 * 1024
 KB_TO_BYTE = 1024
 
+def _local_heads(total_heads, parallel):
+    p = max(int(parallel), 1)
+    return max(total_heads // p, 1)
+
 class Device(Enum):
     NPU = 1
     CPU = 2
@@ -40,6 +44,7 @@ class MemoryModel():
         self.kv_head = self.config.get("num_key_value_heads", self.n_head)  # fallback to n_head if not defined
         self.q_dim = self.n_head * self.head_dim       # total Q projection output dim
         self.kv_dim = self.kv_head * self.head_dim     # total KV projection output dim
+        self.local_kv_dim = _local_heads(self.kv_head, self.tp_size) * self.head_dim
         self.vocab_size = self.config['vocab_size']
         # Accept either the Mistral-style ``num_local_experts`` or the
         # HF/Qwen-style ``num_experts`` key — profiler configs track
@@ -111,7 +116,20 @@ class MemoryModel():
 
         _, embedding, _ = calculate_sizes(self.model, 'embedding', 1, parallel=tp, fp=fp)
         weight += embedding
-        weight += self._get_weight_per_block(tp, ep, fp) * (self.n_layer // pp)
+        layer_types = self.config.get("layer_types")
+        if layer_types and len(layer_types) == self.n_layer:
+            block_weights = [
+                self._get_weight_per_block(tp, ep, fp, layer_type)
+                for layer_type in layer_types
+            ]
+            layers_per_stage = self.n_layer // pp
+            stage_weights = [
+                sum(block_weights[i: i + layers_per_stage])
+                for i in range(0, self.n_layer, layers_per_stage)
+            ]
+            weight += max(stage_weights)
+        else:
+            weight += self._get_weight_per_block(tp, ep, fp) * (self.n_layer // pp)
         _, ln_f, _ = calculate_sizes(self.model, 'final_layernorm', 1, parallel=tp, fp=fp)
         weight += ln_f
         _, lm_head, _ = calculate_sizes(self.model, 'lm_head', 1, parallel=tp, fp=fp)
@@ -123,15 +141,19 @@ class MemoryModel():
         )
         return weight
 
-    def _get_weight_per_block(self, tp, ep, fp):
+    def _get_weight_per_block(self, tp, ep, fp, layer_type=None):
         """Per-block weight: dense layers use TP, MoE experts use EP."""
         block_weight = 0
         _, ln_w, _ = calculate_sizes(self.model, 'layernorm', 1, parallel=tp, fp=fp)
         block_weight += ln_w  # input layernorm
-        _, qkv_w, _ = calculate_sizes(self.model, 'qkv_proj', 1, parallel=tp, fp=fp)
-        block_weight += qkv_w
-        _, o_w, _ = calculate_sizes(self.model, 'o_proj', 1, parallel=tp, fp=fp)
-        block_weight += o_w
+        if layer_type == "linear_attention":
+            _, linear_w, _ = calculate_sizes(self.model, 'linear_attention', 1, parallel=tp, fp=fp)
+            block_weight += linear_w
+        else:
+            _, qkv_w, _ = calculate_sizes(self.model, 'qkv_proj', 1, parallel=tp, fp=fp)
+            block_weight += qkv_w
+            _, o_w, _ = calculate_sizes(self.model, 'o_proj', 1, parallel=tp, fp=fp)
+            block_weight += o_w
         block_weight += ln_w  # post layernorm (same weight size)
         if self.is_moe:
             _, moe_w, _ = calculate_sizes(self.model, 'moe', 1, parallel=ep, fp=fp)
@@ -149,7 +171,7 @@ class MemoryModel():
         # return batch_size = 1 to caclulate max batch_size in scheduler
 
         # K & V multiply 2
-        return 2 * self.kv_dim * seq * self.n_layer * self.kv_fp // self.num_npus
+        return 2 * self.local_kv_dim * seq * self.n_layer * self.kv_fp
     
     # get the total size of current kv cache for the request
     # used when adding prefilled request to decode instance.
@@ -682,8 +704,9 @@ def calculate_sizes(model, layer_name, length, kv_len=None, pim=False, parallel=
     head_dim = config.get('head_dim', n_embd // n_head)
     vocab_size = config['vocab_size']
     kv_head = config.get("num_key_value_heads", n_head)  # fallback to n_head if not defined
-    q_dim = n_head * head_dim       # total Q projection output dim
-    kv_dim = kv_head * head_dim     # total KV projection output dim
+    p = max(int(parallel), 1)
+    local_q_dim = _local_heads(n_head, p) * head_dim
+    local_kv_dim = _local_heads(kv_head, p) * head_dim
     ffn_dim = config.get("intermediate_size", config.get("ffn_dim"))  # dense FFN dim
     moe_ffn_dim = config.get("moe_intermediate_size", ffn_dim)  # per-expert FFN dim (may differ from dense)
     # Same both-name fallback as MemoryModel.__init__ — HF / Qwen use
@@ -691,8 +714,6 @@ def calculate_sizes(model, layer_name, length, kv_len=None, pim=False, parallel=
     num_local_experts = config.get(
         "num_local_experts", config.get("num_experts", 1)
     )
-
-    p = max(int(parallel), 1)
 
     # NOTE (vLLM-style assumptions):
     # NOTE (vLLM-style assumptions):
@@ -714,41 +735,65 @@ def calculate_sizes(model, layer_name, length, kv_len=None, pim=False, parallel=
         output_size = length * n_embd * fp
 
     elif layer_name == "qk_norm":
-        input_size = length * (q_dim + kv_dim) // p * fp
+        input_size = length * (local_q_dim + local_kv_dim) * fp
         weight_size = 2 * head_dim * fp
-        output_size = length * (q_dim + kv_dim) // p * fp
+        output_size = length * (local_q_dim + local_kv_dim) * fp
 
     # ----------------- RoPE & Attention Core -----------------
     elif layer_name == "rotary_emb":
-        input_size = ((n_head // p) + (kv_head // p)) * length * head_dim * fp
+        input_size = length * (local_q_dim + local_kv_dim) * fp
         weight_size = 0
-        output_size = ((n_head // p) + (kv_head // p)) * length * head_dim * fp
+        output_size = length * (local_q_dim + local_kv_dim) * fp
 
     elif layer_name == "attention":
         if not pim:
             input_size = (
-                (n_head // p) * length * head_dim * fp +
-                (kv_head // p) * kv_len * head_dim * fp * 2
+                local_q_dim * length * fp +
+                local_kv_dim * kv_len * fp * 2
             )
             weight_size = 0
-            output_size = (n_head // p) * length * head_dim * fp
+            output_size = local_q_dim * length * fp
         else:
             input_size = (
-                (n_head // p) * 1 * head_dim * fp +
-                (kv_head // p) * 1 * head_dim * fp * 2
+                local_q_dim * fp +
+                local_kv_dim * fp * 2
             )
             weight_size = 0
-            output_size = (n_head // p) * 1 * head_dim * fp
+            output_size = local_q_dim * fp
 
     # ----------------- QKV Projection (fused) -----------------
     elif layer_name == "qkv_proj":
         input_size = length * n_embd * fp
-        weight_size = n_embd * ((q_dim + 2 * kv_dim) // p) * fp
-        output_size = length * ((q_dim + 2 * kv_dim) // p) * fp
+        qkv_dim = local_q_dim + 2 * local_kv_dim
+        weight_size = n_embd * qkv_dim * fp
+        output_size = length * qkv_dim * fp
 
     elif layer_name == "o_proj":
-        input_size = length * (q_dim // p) * fp
-        weight_size = (q_dim // p) * n_embd * fp
+        input_size = length * local_q_dim * fp
+        weight_size = local_q_dim * n_embd * fp
+        output_size = length * n_embd * fp
+
+    elif layer_name == "linear_attention":
+        linear_k_heads = config.get("linear_num_key_heads", n_head)
+        linear_v_heads = config.get("linear_num_value_heads", linear_k_heads)
+        linear_k_dim = config.get("linear_key_head_dim", head_dim)
+        linear_v_dim = config.get("linear_value_head_dim", linear_k_dim)
+        linear_conv_kernel = config.get("linear_conv_kernel_dim", 4)
+        key_dim = linear_k_heads * linear_k_dim
+        value_dim = linear_v_heads * linear_v_dim
+        qkvz_dim = 2 * key_dim + 2 * value_dim
+        conv_dim = 2 * key_dim + value_dim
+        ba_dim = 2 * linear_v_heads
+
+        input_size = length * n_embd * fp
+        weight_size = (
+            n_embd * (qkvz_dim // p) * fp
+            + n_embd * (ba_dim // p) * fp
+            + linear_conv_kernel * (conv_dim // p) * fp
+            + (linear_v_heads // p) * 2 * fp
+            + linear_v_dim * fp
+            + (value_dim // p) * n_embd * fp
+        )
         output_size = length * n_embd * fp
 
     elif layer_name == "gate_up_proj":

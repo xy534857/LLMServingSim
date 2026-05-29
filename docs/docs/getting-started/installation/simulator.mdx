@@ -57,6 +57,29 @@ docker rm -f servingsim_docker
 ./scripts/docker-sim.sh
 ```
 
+### Apple Silicon without x86 emulation
+
+On Apple Silicon, make sure Docker itself is running as ARM. An x86_64
+Colima VM will run the simulator through emulation and make ASTRA-Sim
+painfully slow.
+
+```bash
+colima start --profile servingsim-arm --arch aarch64 --cpu 8 --memory 16 --disk 80
+docker context use colima-servingsim-arm
+docker info --format '{{.Architecture}}'
+```
+
+The architecture should print `aarch64` or `arm64`. Then build the
+simulator image locally from the ASTRA-Sim Dockerfile and launch the
+container with that image:
+
+```bash
+docker build -t llmservingsim-astra-arm:local ./astra-sim
+SIM_DOCKER_IMAGE=llmservingsim-astra-arm:local \
+SIM_CONTAINER_NAME=servingsim_arm \
+  ./scripts/docker-sim.sh
+```
+
 ## 3. Build ASTRA-Sim and install Chakra
 
 Inside the simulator container, compile the analytical backend and

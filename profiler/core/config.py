@@ -40,6 +40,8 @@ SHARD_FIELDS: list[str] = [
     "intermediate_size",
     "num_attention_heads",
     "num_key_value_heads",
+    "linear_num_key_heads",
+    "linear_num_value_heads",
     "vocab_size",
 ]
 
